@@ -5,6 +5,7 @@ import sys
 import os
 import time
 import machine
+import math
 
 #help(machine)
 
@@ -21,7 +22,7 @@ def discover_devices():
     else:
         print(len(devices),"devices found")
         for dev in devices:
-            print("Address: %4x %4x" ,(dev, hex(dev)))
+            print("Address: " ,(dev, hex(dev)))
         print('\n')
 
 discover_devices()
@@ -233,13 +234,22 @@ class Ak09918:
     CNTL3 = 0x32
     TS1 = 0x33
     TS2 = 0x34
-
+    CMM = 0x00 # Power down
+    CMM0 = 0x01  # Measurement mode Single
+    CMM1 = 0x02  # Measurement mode 10 Hz
+    CMM2 = 0x04  # Measurement mode 20 Hz
+    CMM3 = 0x06  # Measurement mode 50 Hz
+    CMM4 = 0x08  # Measurement mode 100 Hz
+    DRDY = 0x01  # data ready
+    DOR  = 0x02  # data overrun
+    
     def __init__(self, i2c, addr = AK09918_ADDR):
         self._address = addr
         self._i2c = i2c
         self.reg_write(self.CNTL3,0x01)
         self.reg_read(self.ST1)
-        self.reg_write(self.CNTL2,0x08)
+        self.reg_write(self.CNTL2,self.CMM)
+        self.reg_write(self.CNTL2,self.CMM0)
 
         self.reg_read(self.ST1)
         self.reg_read(self.CNTL2)
@@ -251,25 +261,49 @@ class Ak09918:
         reg = self._i2c.readfrom_mem(int(self._address),int(addr),1)
         return reg[0]
 
-    def getMagAxis(self):
+    def get_mag_axis(self):
         self.reg_write(self.CNTL3,0x01)
-        self.reg_write(self.CNTL2,0x08)
-        while 1:
-            if self.reg_read(self.ST1):
-                break
-            
-        mag_axis = [0,0,0]
-        mag_axis[0] = self.reg_read(self.HXL)
+        self.reg_write(self.CNTL2,self.CMM0)
+        time.sleep(0.01)
+        while not self.reg_read(self.ST1) & self.DRDY:
+          print(self.reg_read(self.ST1))
+          pass
+        mag_x_axis = bytearray(2)
+        mag_y_axis = bytearray(2)
+        mag_z_axis = bytearray(2)
+        mag_x_axis[0] = self.reg_read(self.HXL)
+        mag_x_axis[1] = self.reg_read(self.HXH)
+        mag_y_axis[0] = self.reg_read(self.HYL)
+        mag_y_axis[1] = self.reg_read(self.HYH)
+        mag_z_axis[0] = self.reg_read(self.HZL)
+        mag_z_axis[1] = self.reg_read(self.HZH)
+        x = int.from_bytes(mag_x_axis,'little',True)
+        y = int.from_bytes(mag_y_axis,'little',True)
+        z = int.from_bytes(mag_z_axis,'little',True)
+        if x > 32767: x -= 65536 
+        if y > 32767: y -= 65536 
+        if z > 32767: z -= 65536 
+        self.reg_read(self.reg_read(self.ST2))
+        return [x,y,z]
 
-        mag_axis[1] = self.reg_read(self.HYL)
-        mag_axis[2] = self.reg_read(self.HZL)
-        return mag_axis
-   
+    def get_heading(self):
+        self.xyz = self.get_mag_axis()
+        #self.normvals = self.normalize(self.mag_axis)
+        self.compass_heading = int(math.atan2(self.xyz[1], self.xyz[0]) * 180.0 / math.pi)
+        self.compass_heading += 180
+        return self.compass_heading
+    
 icm = Icm20600(i2c)
 ak = Ak09918(i2c)
 
-#while True:
-print(icm.getAccel())
-print(icm.getGyro())
-print(ak.getMagAxis())
-time.sleep(1)
+#ax = ak.get_mag_axis()
+#print(ax)
+print(ak.get_heading(),'°')
+
+while True:
+    #print(icm.getAccel())
+    #print(icm.getGyro())
+    print(ak.get_mag_axis())
+    print(ak.get_heading(),'°')
+    time.sleep(1)
+    
