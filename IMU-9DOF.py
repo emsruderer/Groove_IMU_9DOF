@@ -214,6 +214,18 @@ class Icm20600:
         raw_gyro[2] = self.s8(self.reg_read(self.GYRO_ZOUT_H))/0xff*2*2000
         return raw_gyro
 
+class CompassException(Exception):
+    pass
+
+class OverflowException(CompassException):
+    pass
+
+def bytes_to_int16(low_byte:byte,high_byte:byte):
+  x = high_byte << 8 | low_byte 
+  if x > 32767: x -= 65536
+  return int(x)
+ 
+    
 class Ak09918:
     AK09918_ADDR = 0x0C
     WIA1 = 0x00
@@ -240,20 +252,49 @@ class Ak09918:
     CMM2 = 0x04  # Measurement mode 20 Hz
     CMM3 = 0x06  # Measurement mode 50 Hz
     CMM4 = 0x08  # Measurement mode 100 Hz
+    TEST = 0x10  # Self-test mode
     DRDY = 0x01  # data ready
     DOR  = 0x02  # data overrun
-    
+    SRST = 0x01  # Software Reset
+    HOFL = 0x08  # Sensor overflow
+    Company_ID = 72
+    Device_ID = 12
+     
     def __init__(self, i2c, addr = AK09918_ADDR):
         self._address = addr
         self._i2c = i2c
-        self.reg_write(self.CNTL3,0x01)
-        self.reg_read(self.ST1)
-        self.reg_write(self.CNTL2,self.CMM)
-        self.reg_write(self.CNTL2,self.CMM0)
+        self.reset()
+        self.mag_x_axis = 0
+        self.mag_y_axis = 0
+        self.mag_z_axis = 0
+        self.test()
 
-        self.reg_read(self.ST1)
-        self.reg_read(self.CNTL2)
-        
+    def reset(self):
+        self.reg_write(self.CNTL3,self.SRST)
+       
+    def test(self):
+        company = self.reg_read(self.WIA1)
+        device = self.reg_read(self.WIA2)
+        # print("Company: 72 ==",company, "Device: 12 ==",device)
+        if (company != self.Company_ID) or (device != self.Device_ID):
+          raise CompassException("Not an AK09918 device")
+        self.reset()
+        self.reg_write(self.CNTL2,self.TEST)
+        #time.sleep(0.01)
+        while not self.reg_read(self.ST1) & self.DRDY:
+           pass
+        axis = [bytes_to_int16(self.reg_read(self.HXL),self.reg_read(self.HXH)),
+                bytes_to_int16(self.reg_read(self.HYL),self.reg_read(self.HYH)),
+                bytes_to_int16(self.reg_read(self.HZL),self.reg_read(self.HZH))]
+        print(axis)
+        if ((-200 <= axis[0] <= 200) and
+           (-200 <= axis[1] <= 200) and
+           (-1000 <= axis[2] <= -150)):
+               print("OK")
+               return True
+        else:
+            raise CompassException("Compass AK09918 invalid")
+       
     def reg_write(self,reg,data):
         self._i2c.writeto_mem(int(self._address),int(reg),bytes([int(data)]))
 
@@ -262,48 +303,39 @@ class Ak09918:
         return reg[0]
 
     def get_mag_axis(self):
-        self.reg_write(self.CNTL3,0x01)
+        self.reset()
         self.reg_write(self.CNTL2,self.CMM0)
-        time.sleep(0.01)
         while not self.reg_read(self.ST1) & self.DRDY:
-          print(self.reg_read(self.ST1))
+          #print(self.reg_read(self.ST1))
           pass
-        mag_x_axis = bytearray(2)
-        mag_y_axis = bytearray(2)
-        mag_z_axis = bytearray(2)
-        mag_x_axis[0] = self.reg_read(self.HXL)
-        mag_x_axis[1] = self.reg_read(self.HXH)
-        mag_y_axis[0] = self.reg_read(self.HYL)
-        mag_y_axis[1] = self.reg_read(self.HYH)
-        mag_z_axis[0] = self.reg_read(self.HZL)
-        mag_z_axis[1] = self.reg_read(self.HZH)
-        x = int.from_bytes(mag_x_axis,'little',True)
-        y = int.from_bytes(mag_y_axis,'little',True)
-        z = int.from_bytes(mag_z_axis,'little',True)
-        if x > 32767: x -= 65536 
-        if y > 32767: y -= 65536 
-        if z > 32767: z -= 65536 
-        self.reg_read(self.reg_read(self.ST2))
-        return [x,y,z]
+        self.mag_x_axis = bytes_to_int16(self.reg_read(self.HXL),self.reg_read(self.HXH))
+        self.mag_y_axis = bytes_to_int16(self.reg_read(self.HYL),self.reg_read(self.HYH))
+        self.mag_z_axis = bytes_to_int16(self.reg_read(self.HZL),self.reg_read(self.HZH))
+        if self.reg_read(self.reg_read(self.ST2)) & self.HOFL:
+             raise OverflowException ()          
+        return [self.mag_x_axis,self.mag_y_axis,self.mag_z_axis]
 
     def get_heading(self):
-        self.xyz = self.get_mag_axis()
+        #self.xyz = self.get_mag_axis()
         #self.normvals = self.normalize(self.mag_axis)
-        self.compass_heading = int(math.atan2(self.xyz[1], self.xyz[0]) * 180.0 / math.pi)
+        x = self.mag_x_axis
+        y = self.mag_y_axis
+        self.compass_heading = int(math.atan2(y, x) * 180.0 / math.pi)
         self.compass_heading += 180
         return self.compass_heading
     
 icm = Icm20600(i2c)
 ak = Ak09918(i2c)
 
-#ax = ak.get_mag_axis()
-#print(ax)
-print(ak.get_heading(),'°')
-
 while True:
     #print(icm.getAccel())
-    #print(icm.getGyro())
-    print(ak.get_mag_axis())
+    #print(icm.getGyro()
+  try:
+    xyz = ak.get_mag_axis()
+    #print(xyz)
     print(ak.get_heading(),'°')
-    time.sleep(1)
+  except OverflowException:
+    pass #print("An OverFlowException Occurred")
+  continue
+ 
     
